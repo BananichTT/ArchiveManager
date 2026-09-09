@@ -1,3 +1,5 @@
+import com.android.build.gradle.BaseExtension
+
 allprojects {
     repositories {
         google()
@@ -15,6 +17,18 @@ subprojects {
 
 subprojects {
     project.evaluationDependsOn(":app")
+}
+
+// Global override for compileSdkVersion to 37
+// Using whenPluginAdded to avoid "already evaluated" errors
+subprojects {
+    plugins.whenPluginAdded {
+        if (this is com.android.build.gradle.api.AndroidBasePlugin) {
+            project.extensions.findByType(BaseExtension::class.java)?.apply {
+                compileSdkVersion(37)
+            }
+        }
+    }
 }
 
 tasks.register<Delete>("clean") {
