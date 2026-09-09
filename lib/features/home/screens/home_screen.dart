@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../../core/widgets/app_drawer.dart';
+import '../../../core/services/storage_service.dart';
 import '../models/store_item.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -13,16 +14,37 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  final StorageService _storageService = StorageService();
   List<StoreItem> _stores = [];
   bool _isLoading = false;
 
-  void _clearStores() {
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedStores();
+  }
+
+  Future<void> _loadSavedStores() async {
+    setState(() {
+      _isLoading = true;
+    });
+    final savedStores = await _storageService.loadStores();
+    setState(() {
+      _stores = savedStores;
+      _isLoading = false;
+    });
+  }
+
+  void _clearStores() async {
     setState(() {
       _stores = [];
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Список очищен')),
-    );
+    await _storageService.clearStores();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Список очищен')),
+      );
+    }
   }
 
   Future<void> _pickAndLoadFile() async {
@@ -46,6 +68,8 @@ class _HomeScreenState extends State<HomeScreen> {
           _stores = jsonData.map((item) => StoreItem.fromJson(item)).toList();
           _isLoading = false;
         });
+
+        await _storageService.saveStores(_stores);
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
