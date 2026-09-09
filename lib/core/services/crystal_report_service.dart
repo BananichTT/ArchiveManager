@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 
 class CrystalReportService {
   
@@ -30,16 +31,30 @@ class CrystalReportService {
 
     List<AssetEntity> allAssets = [];
     for (var path in paths) {
-      // "Recent" path usually contains all assets, but to be safe and cross-album, 
-      // we check all paths if needed, though filtered by date usually returns what we want globally
       if (path.isAll) {
          final assets = await path.getAssetListRange(start: 0, end: 1000);
          allAssets.addAll(assets);
-         break; // Found the "All" path, no need to check others for global search
+         break;
       }
     }
     
     return allAssets;
+  }
+
+  Future<File?> _compressImage(File file) async {
+    final tempDir = await getTemporaryDirectory();
+    final fileName = p.basename(file.path);
+    final targetPath = p.join(tempDir.path, "compressed_${DateTime.now().millisecondsSinceEpoch}_$fileName");
+
+    final XFile? result = await FlutterImageCompress.compressAndGetFile(
+      file.absolute.path,
+      targetPath,
+      quality: 80,
+      minWidth: 1920,
+      minHeight: 1080,
+    );
+
+    return result != null ? File(result.path) : null;
   }
 
   Future<String> createArchive(List<File> files, String archiveName) async {
@@ -53,10 +68,27 @@ class CrystalReportService {
     final zipPath = '${reportsDir.path}/$archiveName.zip';
     encoder.create(zipPath);
 
-    for (var file in files) {
-      encoder.addFile(file);
+    List<File> tempFiles = [];
+    try {
+      for (var file in files) {
+        File fileToAdd = file;
+        final ext = p.extension(file.path).toLowerCase();
+        if (['.jpg', '.jpeg', '.png'].contains(ext)) {
+          final compressed = await _compressImage(file);
+          if (compressed != null) {
+            fileToAdd = compressed;
+            tempFiles.add(compressed);
+          }
+        }
+        encoder.addFile(fileToAdd);
+      }
+    } finally {
+      encoder.close();
+      // Cleanup temp files
+      for (var f in tempFiles) {
+        if (await f.exists()) await f.delete();
+      }
     }
-    encoder.close();
 
     return zipPath;
   }
@@ -81,24 +113,42 @@ class CrystalReportService {
 
   Future<File> generatePdf(List<File> images, String pdfName) async {
     final pdf = pw.Document();
+    List<File> tempFiles = [];
 
-    for (var imageFile in images) {
-      final image = pw.MemoryImage(imageFile.readAsBytesSync());
-      pdf.addPage(
-        pw.Page(
-          pageFormat: PdfPageFormat.a4,
-          build: (pw.Context context) {
-            return pw.Center(
-              child: pw.Image(image, fit: pw.BoxFit.contain),
-            );
-          },
-        ),
-      );
+    try {
+      for (var imageFile in images) {
+        File fileToUse = imageFile;
+        final ext = p.extension(imageFile.path).toLowerCase();
+        if (['.jpg', '.jpeg', '.png'].contains(ext)) {
+          final compressed = await _compressImage(imageFile);
+          if (compressed != null) {
+            fileToUse = compressed;
+            tempFiles.add(compressed);
+          }
+        }
+
+        final image = pw.MemoryImage(fileToUse.readAsBytesSync());
+        pdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat.a4,
+            build: (pw.Context context) {
+              return pw.Center(
+                child: pw.Image(image, fit: pw.BoxFit.contain),
+              );
+            },
+          ),
+        );
+      }
+
+      final directory = await getTemporaryDirectory();
+      final file = File('${directory.path}/$pdfName.pdf');
+      await file.writeAsBytes(await pdf.save());
+      return file;
+    } finally {
+      // Cleanup temp files
+      for (var f in tempFiles) {
+        if (await f.exists()) await f.delete();
+      }
     }
-
-    final directory = await getTemporaryDirectory();
-    final file = File('${directory.path}/$pdfName.pdf');
-    await file.writeAsBytes(await pdf.save());
-    return file;
   }
 }

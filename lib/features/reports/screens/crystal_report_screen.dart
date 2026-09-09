@@ -26,6 +26,7 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
   
   bool _showTempFolder = false;
   bool _isLoading = false;
+  String _loadingMessage = 'Загрузка...';
   bool _hasPermission = false;
 
   @override
@@ -56,6 +57,7 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
 
     setState(() {
       _isLoading = true;
+      _loadingMessage = 'Загрузка фотографий...';
     });
 
     try {
@@ -134,7 +136,10 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
     );
 
     if (pdfName != null && pdfName.isNotEmpty) {
-      setState(() => _isLoading = true);
+      setState(() {
+        _isLoading = true;
+        _loadingMessage = 'Сжатие и создание PDF...';
+      });
       try {
         List<File> files = [];
         for (var asset in _selectedAssets) {
@@ -165,6 +170,7 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
 
     setState(() {
       _isLoading = true;
+      _loadingMessage = 'Сжатие и архивация...';
     });
 
     final nameController = TextEditingController(
@@ -247,7 +253,16 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
                 _buildDateSelector(),
                 Expanded(
                   child: _isLoading
-                      ? const Center(child: CircularProgressIndicator())
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const CircularProgressIndicator(),
+                              const SizedBox(height: 16),
+                              Text(_loadingMessage),
+                            ],
+                          ),
+                        )
                       : _showTempFolder
                           ? _buildTempFolderView()
                           : _buildGalleryView(),
