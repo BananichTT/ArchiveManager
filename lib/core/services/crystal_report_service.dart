@@ -3,6 +3,8 @@ import 'package:photo_manager/photo_manager.dart';
 import 'package:archive/archive_io.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 
 class CrystalReportService {
   
@@ -75,5 +77,28 @@ class CrystalReportService {
     if (await file.exists()) {
       await file.delete();
     }
+  }
+
+  Future<File> generatePdf(List<File> images, String pdfName) async {
+    final pdf = pw.Document();
+
+    for (var imageFile in images) {
+      final image = pw.MemoryImage(imageFile.readAsBytesSync());
+      pdf.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          build: (pw.Context context) {
+            return pw.Center(
+              child: pw.Image(image, fit: pw.BoxFit.contain),
+            );
+          },
+        ),
+      );
+    }
+
+    final directory = await getTemporaryDirectory();
+    final file = File('${directory.path}/$pdfName.pdf');
+    await file.writeAsBytes(await pdf.save());
+    return file;
   }
 }

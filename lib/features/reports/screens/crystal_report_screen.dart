@@ -16,7 +16,14 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
   final CrystalReportService _reportService = CrystalReportService();
   DateTime _selectedDate = DateTime.now();
   List<AssetEntity> _assets = [];
-  List<AssetEntity> _stagedAssets = [];
+  
+  // Selection logic for the grid (numbered)
+  List<AssetEntity> _selectedAssets = [];
+  
+  // Staged files for the final archive
+  List<AssetEntity> _finalStagedAssets = [];
+  List<File> _generatedPdfs = [];
+  
   bool _showTempFolder = false;
   bool _isLoading = false;
   bool _hasPermission = false;
@@ -69,12 +76,12 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
     }
   }
 
-  void _toggleStaging(AssetEntity asset) {
+  void _toggleSelection(AssetEntity asset) {
     setState(() {
-      if (_stagedAssets.contains(asset)) {
-        _stagedAssets.remove(asset);
+      if (_selectedAssets.contains(asset)) {
+        _selectedAssets.remove(asset);
       } else {
-        _stagedAssets.add(asset);
+        _selectedAssets.add(asset);
       }
     });
   }
@@ -94,8 +101,67 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
     }
   }
 
+  void _moveToFinalStaging() {
+    setState(() {
+      _finalStagedAssets.addAll(_selectedAssets);
+      _selectedAssets.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Фото добавлены во временную папку')),
+    );
+  }
+
+  Future<void> _createPdfFromSelected() async {
+    if (_selectedAssets.isEmpty) return;
+
+    final nameController = TextEditingController(
+      text: 'Doc_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}',
+    );
+
+    final String? pdfName = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Создать PDF'),
+        content: TextField(
+          controller: nameController,
+          decoration: const InputDecoration(labelText: 'Имя PDF файла'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(context, nameController.text), child: const Text('Создать')),
+        ],
+      ),
+    );
+
+    if (pdfName != null && pdfName.isNotEmpty) {
+      setState(() => _isLoading = true);
+      try {
+        List<File> files = [];
+        for (var asset in _selectedAssets) {
+          final f = await asset.file;
+          if (f != null) files.add(f);
+        }
+        
+        final pdfFile = await _reportService.generatePdf(files, pdfName);
+        setState(() {
+          _generatedPdfs.add(pdfFile);
+          _selectedAssets.clear();
+          _isLoading = false;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('PDF создан и добавлен во временную папку')),
+          );
+        }
+      } catch (e) {
+        setState(() => _isLoading = false);
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка PDF: $e')));
+      }
+    }
+  }
+
   Future<void> _createArchive() async {
-    if (_stagedAssets.isEmpty) return;
+    if (_finalStagedAssets.isEmpty && _generatedPdfs.isEmpty) return;
 
     setState(() {
       _isLoading = true;
@@ -128,8 +194,8 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
 
     if (archiveName != null && archiveName.isNotEmpty) {
       try {
-        List<File> filesToArchive = [];
-        for (var asset in _stagedAssets) {
+        List<File> filesToArchive = [..._generatedPdfs];
+        for (var asset in _finalStagedAssets) {
           final file = await asset.file;
           if (file != null) {
             filesToArchive.add(file);
@@ -137,12 +203,13 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
         }
 
         if (filesToArchive.isEmpty) {
-          throw Exception("Не удалось получить файлы для архивации");
+          throw Exception("Нет файлов для архивации");
         }
 
         final path = await _reportService.createArchive(filesToArchive, archiveName);
         setState(() {
-          _stagedAssets.clear();
+          _finalStagedAssets.clear();
+          _generatedPdfs.clear();
           _isLoading = false;
         });
         if (mounted) {
@@ -171,7 +238,7 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Отчет Кристалл (Авто)'),
+        title: const Text('Отчет Кристалл'),
       ),
       body: !_hasPermission 
           ? _buildPermissionRequestView()
@@ -183,7 +250,7 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
                       ? const Center(child: CircularProgressIndicator())
                       : _showTempFolder
                           ? _buildTempFolderView()
-                          : _buildPhotoGridView(),
+                          : _buildGalleryView(),
                 ),
               ],
             ),
@@ -228,6 +295,48 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
     );
   }
 
+  Widget _buildGalleryView() {
+    return Column(
+      children: [
+        Expanded(child: _buildPhotoGridView()),
+        if (_selectedAssets.isNotEmpty) _buildSelectionActions(),
+      ],
+    );
+  }
+
+  Widget _buildSelectionActions() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, -2)),
+        ],
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: _createPdfFromSelected,
+              icon: const Icon(Icons.picture_as_pdf),
+              label: const Text('Создать PDF'),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red[50], foregroundColor: Colors.red),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: _moveToFinalStaging,
+              icon: const Icon(Icons.add_to_photos),
+              label: const Text('В архив'),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple[50], foregroundColor: Colors.deepPurple),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPhotoGridView() {
     if (_assets.isEmpty) {
       return const Center(
@@ -245,9 +354,11 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
       itemCount: _assets.length,
       itemBuilder: (context, index) {
         final asset = _assets[index];
-        final isStaged = _stagedAssets.contains(asset);
+        final selectionIndex = _selectedAssets.indexOf(asset);
+        final isSelected = selectionIndex != -1;
+        
         return GestureDetector(
-          onTap: () => _toggleStaging(asset),
+          onTap: () => _toggleSelection(asset),
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -263,10 +374,22 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
                   return const Center(child: CircularProgressIndicator());
                 },
               ),
-              if (isStaged)
+              if (isSelected)
                 Container(
-                  color: Colors.black26,
-                  child: const Icon(Icons.check_circle, color: Colors.green, size: 40),
+                  color: Colors.black45,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: const BoxDecoration(
+                        color: Colors.deepPurple,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Text(
+                        '${selectionIndex + 1}',
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18),
+                      ),
+                    ),
+                  ),
                 ),
             ],
           ),
@@ -276,43 +399,52 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
   }
 
   Widget _buildTempFolderView() {
-    if (_stagedAssets.isEmpty) {
+    if (_finalStagedAssets.isEmpty && _generatedPdfs.isEmpty) {
       return const Center(
-        child: Text('Временная папка пуста.\nДобавьте фото из галереи.'),
+        child: Text('Временная папка пуста.\nДобавьте файлы из галереи.'),
       );
     }
 
     return Column(
       children: [
         Expanded(
-          child: ListView.builder(
-            itemCount: _stagedAssets.length,
-            itemBuilder: (context, index) {
-              final asset = _stagedAssets[index];
-              return ListTile(
-                leading: SizedBox(
-                  width: 50,
-                  height: 50,
-                  child: FutureBuilder<Uint8List?>(
+          child: ListView(
+            children: [
+              if (_generatedPdfs.isNotEmpty) ...[
+                const Padding(
+                  padding: EdgeInsets.all(12.0),
+                  child: Text('PDF ФАЙЛЫ', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.grey)),
+                ),
+                ..._generatedPdfs.map((file) => ListTile(
+                  leading: const Icon(Icons.picture_as_pdf, color: Colors.red),
+                  title: Text(file.path.split('/').last),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () => setState(() => _generatedPdfs.remove(file)),
+                  ),
+                )),
+              ],
+              if (_finalStagedAssets.isNotEmpty) ...[
+                const Padding(
+                  padding: EdgeInsets.all(12.0),
+                  child: Text('ФОТОГРАФИИ', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.grey)),
+                ),
+                ..._finalStagedAssets.map((asset) => ListTile(
+                  leading: FutureBuilder<Uint8List?>(
                     future: asset.thumbnailData,
                     builder: (context, snapshot) {
-                      if (snapshot.connectionState == ConnectionState.done && snapshot.data != null) {
-                        return Image.memory(
-                          snapshot.data!,
-                          fit: BoxFit.cover,
-                        );
-                      }
-                      return const Center(child: CircularProgressIndicator());
+                      if (snapshot.data != null) return Image.memory(snapshot.data!, width: 50, height: 50, fit: BoxFit.cover);
+                      return const SizedBox(width: 50, height: 50);
                     },
                   ),
-                ),
-                title: Text(asset.title ?? 'Image ${index + 1}'),
-                trailing: IconButton(
-                  icon: const Icon(Icons.remove_circle_outline, color: Colors.red),
-                  onPressed: () => _toggleStaging(asset),
-                ),
-              );
-            },
+                  title: Text(asset.title ?? 'Image'),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.remove_circle_outline),
+                    onPressed: () => setState(() => _finalStagedAssets.remove(asset)),
+                  ),
+                )),
+              ],
+            ],
           ),
         ),
         Padding(
@@ -320,9 +452,11 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
           child: ElevatedButton.icon(
             onPressed: _isLoading ? null : _createArchive,
             icon: const Icon(Icons.archive),
-            label: const Text('Создать архив'),
+            label: const Text('Создать итоговый архив'),
             style: ElevatedButton.styleFrom(
               minimumSize: const Size.fromHeight(50),
+              backgroundColor: Colors.deepPurple,
+              foregroundColor: Colors.white,
             ),
           ),
         ),
@@ -331,6 +465,7 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
   }
 
   Widget _buildBottomBar() {
+    final totalItems = _finalStagedAssets.length + _generatedPdfs.length;
     return BottomNavigationBar(
       currentIndex: _showTempFolder ? 1 : 0,
       onTap: (index) {
@@ -347,27 +482,14 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
           icon: Stack(
             children: [
               const Icon(Icons.folder_special),
-              if (_stagedAssets.isNotEmpty)
+              if (totalItems > 0)
                 Positioned(
                   right: 0,
                   child: Container(
                     padding: const EdgeInsets.all(2),
-                    decoration: BoxDecoration(
-                      color: Colors.red,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    constraints: const BoxConstraints(
-                      minWidth: 14,
-                      minHeight: 14,
-                    ),
-                    child: Text(
-                      '${_stagedAssets.length}',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 8,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
+                    decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(6)),
+                    constraints: const BoxConstraints(minWidth: 14, minHeight: 14),
+                    child: Text('$totalItems', style: const TextStyle(color: Colors.white, fontSize: 8), textAlign: TextAlign.center),
                   ),
                 ),
             ],
