@@ -17,13 +17,19 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
   DateTime _selectedDate = DateTime.now();
   List<AssetEntity> _assets = [];
   
-  // Selection logic for the grid (numbered)
+  // Cache for thumbnails to prevent flickering
+  final Map<String, Uint8List> _thumbnailCache = {};
+  
+  // Selection logic for the gallery grid (numbered)
   List<AssetEntity> _selectedAssets = [];
   
   // Staged files for the final archive
   List<AssetEntity> _finalStagedAssets = [];
   List<File> _generatedPdfs = [];
   
+  // Selection logic for the temporary folder (staging)
+  final Set<dynamic> _tempFolderSelection = {}; // Can contain AssetEntity or File (PDF)
+
   bool _showTempFolder = false;
   bool _isLoading = false;
   String _loadingMessage = 'Загрузка...';
@@ -87,6 +93,16 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
       }
     });
   }
+  
+  void _toggleTempFolderSelection(dynamic item) {
+    setState(() {
+      if (_tempFolderSelection.contains(item)) {
+        _tempFolderSelection.remove(item);
+      } else {
+        _tempFolderSelection.add(item);
+      }
+    });
+  }
 
   Future<void> _selectDate() async {
     final DateTime? picked = await showDatePicker(
@@ -98,6 +114,7 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
     if (picked != null && picked != _selectedDate) {
       setState(() {
         _selectedDate = picked;
+        _thumbnailCache.clear(); // Clear cache for new date
       });
       _loadAssets();
     }
@@ -165,6 +182,35 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
     }
   }
 
+  Future<void> _deleteSelectedFromStaging() async {
+    if (_tempFolderSelection.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить из папки?'),
+        content: Text('Будет удалено ${_tempFolderSelection.length} объектов из временной папки.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Удалить', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() {
+        for (var item in _tempFolderSelection) {
+          if (item is AssetEntity) {
+            _finalStagedAssets.remove(item);
+          } else if (item is File) {
+            _generatedPdfs.remove(item);
+          }
+        }
+        _tempFolderSelection.clear();
+      });
+    }
+  }
+
   Future<void> _createArchive() async {
     if (_finalStagedAssets.isEmpty && _generatedPdfs.isEmpty) return;
 
@@ -200,6 +246,16 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
 
     if (archiveName != null && archiveName.isNotEmpty) {
       try {
+        final now = DateTime.now();
+        final logicalDate = DateTime(
+          _selectedDate.year,
+          _selectedDate.month,
+          _selectedDate.day,
+          now.hour,
+          now.minute,
+          now.second,
+        );
+
         List<File> filesToArchive = [..._generatedPdfs];
         for (var asset in _finalStagedAssets) {
           final file = await asset.file;
@@ -212,10 +268,11 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
           throw Exception("Нет файлов для архивации");
         }
 
-        final path = await _reportService.createArchive(filesToArchive, archiveName);
+        final path = await _reportService.createArchive(filesToArchive, archiveName, logicalDate: logicalDate);
         setState(() {
           _finalStagedAssets.clear();
           _generatedPdfs.clear();
+          _tempFolderSelection.clear();
           _isLoading = false;
         });
         if (mounted) {
@@ -377,18 +434,7 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              FutureBuilder<Uint8List?>(
-                future: asset.thumbnailData,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.done && snapshot.data != null) {
-                    return Image.memory(
-                      snapshot.data!,
-                      fit: BoxFit.cover,
-                    );
-                  }
-                  return const Center(child: CircularProgressIndicator());
-                },
-              ),
+              _buildCachedThumbnail(asset),
               if (isSelected)
                 Container(
                   color: Colors.black45,
@@ -413,8 +459,33 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
     );
   }
 
+  Widget _buildCachedThumbnail(AssetEntity asset) {
+    if (_thumbnailCache.containsKey(asset.id)) {
+      return Image.memory(
+        _thumbnailCache[asset.id]!,
+        fit: BoxFit.cover,
+      );
+    }
+
+    return FutureBuilder<Uint8List?>(
+      future: asset.thumbnailData,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.done && snapshot.data != null) {
+          _thumbnailCache[asset.id] = snapshot.data!;
+          return Image.memory(
+            snapshot.data!,
+            fit: BoxFit.cover,
+          );
+        }
+        return const Center(child: CircularProgressIndicator());
+      },
+    );
+  }
+
   Widget _buildTempFolderView() {
-    if (_finalStagedAssets.isEmpty && _generatedPdfs.isEmpty) {
+    final allStagedItems = [..._generatedPdfs, ..._finalStagedAssets];
+    
+    if (allStagedItems.isEmpty) {
       return const Center(
         child: Text('Временная папка пуста.\nДобавьте файлы из галереи.'),
       );
@@ -423,48 +494,98 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
     return Column(
       children: [
         Expanded(
-          child: ListView(
-            children: [
-              if (_generatedPdfs.isNotEmpty) ...[
-                const Padding(
-                  padding: EdgeInsets.all(12.0),
-                  child: Text('PDF ФАЙЛЫ', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.grey)),
+          child: GridView.builder(
+            padding: const EdgeInsets.all(8),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+            ),
+            itemCount: allStagedItems.length,
+            itemBuilder: (context, index) {
+              final item = allStagedItems[index];
+              final isSelected = _tempFolderSelection.contains(item);
+              
+              Widget content;
+              if (item is File) {
+                // PDF File
+                content = Container(
+                  decoration: BoxDecoration(
+                    color: Colors.red[50],
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: Colors.red[100]!),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.picture_as_pdf, color: Colors.red, size: 40),
+                      const SizedBox(height: 4),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: Text(item.path.split('/').last, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10)),
+                      ),
+                    ],
+                  ),
+                );
+              } else {
+                // AssetEntity (Photo)
+                content = ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: _buildCachedThumbnail(item as AssetEntity),
+                );
+              }
+
+              return GestureDetector(
+                onTap: () => _toggleTempFolderSelection(item),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    content,
+                    if (isSelected)
+                      Container(
+                        color: Colors.black45,
+                        child: const Center(
+                          child: Icon(Icons.check_circle, color: Colors.green, size: 40),
+                        ),
+                      ),
+                  ],
                 ),
-                ..._generatedPdfs.map((file) => ListTile(
-                  leading: const Icon(Icons.picture_as_pdf, color: Colors.red),
-                  title: Text(file.path.split('/').last),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => setState(() => _generatedPdfs.remove(file)),
-                  ),
-                )),
-              ],
-              if (_finalStagedAssets.isNotEmpty) ...[
-                const Padding(
-                  padding: EdgeInsets.all(12.0),
-                  child: Text('ФОТОГРАФИИ', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.grey)),
-                ),
-                ..._finalStagedAssets.map((asset) => ListTile(
-                  leading: FutureBuilder<Uint8List?>(
-                    future: asset.thumbnailData,
-                    builder: (context, snapshot) {
-                      if (snapshot.data != null) return Image.memory(snapshot.data!, width: 50, height: 50, fit: BoxFit.cover);
-                      return const SizedBox(width: 50, height: 50);
-                    },
-                  ),
-                  title: Text(asset.title ?? 'Image'),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.remove_circle_outline),
-                    onPressed: () => setState(() => _finalStagedAssets.remove(asset)),
-                  ),
-                )),
-              ],
-            ],
+              );
+            },
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: ElevatedButton.icon(
+        _buildTempFolderActions(),
+      ],
+    );
+  }
+
+  Widget _buildTempFolderActions() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, -2)),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_tempFolderSelection.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: ElevatedButton.icon(
+                onPressed: _deleteSelectedFromStaging,
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('Удалить из папки'),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(45),
+                  backgroundColor: Colors.grey[100],
+                  foregroundColor: Colors.grey[700],
+                ),
+              ),
+            ),
+          ElevatedButton.icon(
             onPressed: _isLoading ? null : _createArchive,
             icon: const Icon(Icons.archive),
             label: const Text('Создать итоговый архив'),
@@ -474,8 +595,8 @@ class _CrystalReportScreenState extends State<CrystalReportScreen> {
               foregroundColor: Colors.white,
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 

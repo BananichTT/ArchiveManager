@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'features/home/screens/home_screen.dart';
 import 'features/downloads/screens/downloads_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('ru_RU', null);
   runApp(const ArchiveManagerApp());
 }
 
